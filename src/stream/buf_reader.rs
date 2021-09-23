@@ -8,7 +8,7 @@ use std::io::{self, BufRead, Read};
 ))]
 use std::{mem::MaybeUninit, pin::Pin};
 
-#[cfg(feature = "futures-util-03")]
+#[cfg(feature = "futures-core-03")]
 use std::task::{Context, Poll};
 
 #[cfg(feature = "futures-03")]
@@ -25,8 +25,8 @@ use tokio_03_dep::io::AsyncBufRead as _;
 #[cfg(feature = "tokio")]
 use tokio_dep::io::AsyncBufRead as _;
 
-#[cfg(feature = "futures-util-03")]
-use futures_util_03::ready;
+#[cfg(feature = "futures-core-03")]
+use futures_core_03::ready;
 
 #[cfg(feature = "pin-project-lite")]
 pin_project! {
@@ -208,7 +208,7 @@ where
 #[cfg(feature = "futures-03")]
 impl<R> CombineAsyncRead<R> for Buffer
 where
-    R: futures_util_03::io::AsyncRead,
+    R: futures_io_03::AsyncRead,
 {
     fn poll_extend_buf(
         &mut self,
@@ -250,6 +250,17 @@ where
 }
 
 #[cfg(feature = "tokio-03")]
+fn tokio_03_to_read_buf(bs: &mut BytesMut) -> tokio_03_dep::io::ReadBuf<'_> {
+    let uninit = bs.chunk_mut();
+    unsafe {
+        tokio_03_dep::io::ReadBuf::uninit(std::slice::from_raw_parts_mut(
+            uninit.as_mut_ptr() as *mut MaybeUninit<u8>,
+            uninit.len(),
+        ))
+    }
+}
+
+#[cfg(feature = "tokio-03")]
 impl<R> CombineRead<R, dyn tokio_03_dep::io::AsyncRead> for Buffer
 where
     R: tokio_03_dep::io::AsyncRead,
@@ -259,22 +270,7 @@ where
         cx: &mut Context<'_>,
         read: Pin<&mut R>,
     ) -> Poll<io::Result<usize>> {
-        if !self.0.has_remaining_mut() {
-            self.0.reserve(8 * 1024);
-        }
-        let uninit = self.0.chunk_mut();
-        let mut buf = unsafe {
-            tokio_03_dep::io::ReadBuf::uninit(std::slice::from_raw_parts_mut(
-                uninit.as_mut_ptr() as *mut MaybeUninit<u8>,
-                uninit.len(),
-            ))
-        };
-        ready!(read.poll_read(cx, &mut buf))?;
-        let n = buf.filled().len();
-        unsafe {
-            self.0.advance_mut(n);
-        }
-        Poll::Ready(Ok(n))
+        tokio_03_read_buf(cx, read, &mut self.0)
     }
 }
 
@@ -288,13 +284,9 @@ fn tokio_03_read_buf(
         bs.reserve(8 * 1024);
     }
 
+    let mut buf = tokio_03_to_read_buf(bs);
+    ready!(read.poll_read(cx, &mut buf))?;
     unsafe {
-        let uninit = bs.chunk_mut();
-        let mut buf = tokio_03_dep::io::ReadBuf::uninit(std::slice::from_raw_parts_mut(
-            uninit.as_mut_ptr() as *mut MaybeUninit<u8>,
-            uninit.len(),
-        ));
-        ready!(read.poll_read(cx, &mut buf))?;
         let n = buf.filled().len();
         bs.advance_mut(n);
         Poll::Ready(Ok(n))
@@ -311,44 +303,21 @@ where
         cx: &mut Context<'_>,
         read: Pin<&mut R>,
     ) -> Poll<io::Result<usize>> {
-        if !self.0.has_remaining_mut() {
-            self.0.reserve(8 * 1024);
-        }
-        let mut buf = unsafe {
-            tokio_dep::io::ReadBuf::uninit(
-                &mut *(self.0.chunk_mut() as *mut _ as *mut [MaybeUninit<u8>]),
-            )
-        };
-        ready!(read.poll_read(cx, &mut buf))?;
-        let n = buf.filled().len();
-        unsafe {
-            self.0.advance_mut(n);
-        }
-        Poll::Ready(Ok(n))
+        tokio_read_buf(read, cx, &mut self.0)
     }
 }
 
 #[cfg(feature = "tokio")]
 fn tokio_read_buf(
-    cx: &mut Context<'_>,
     read: Pin<&mut impl tokio_dep::io::AsyncRead>,
+    cx: &mut Context<'_>,
     bs: &mut bytes::BytesMut,
 ) -> Poll<io::Result<usize>> {
     if !bs.has_remaining_mut() {
         bs.reserve(8 * 1024);
     }
 
-    unsafe {
-        let uninit = bs.chunk_mut();
-        let mut buf = tokio_dep::io::ReadBuf::uninit(std::slice::from_raw_parts_mut(
-            uninit.as_mut_ptr() as *mut MaybeUninit<u8>,
-            uninit.len(),
-        ));
-        ready!(read.poll_read(cx, &mut buf))?;
-        let n = buf.filled().len();
-        bs.advance_mut(n);
-        Poll::Ready(Ok(n))
-    }
+    tokio_util::io::poll_read_buf(read, cx, bs)
 }
 
 /// Marker used by `Decoder` for an external buffer
@@ -389,27 +358,30 @@ where
         buf.reserve(8 * 1024);
     }
 
-    // Copy of tokio's read_buf method (but it has to force initialize the buffer)
-    let copied = unsafe {
-        let n = {
-            let bs = buf.chunk_mut();
+    // Copy of tokio's poll_read_buf method (but it has to force initialize the buffer)
+    let n = {
+        let bs = buf.chunk_mut();
 
-            for i in 0..bs.len() {
-                bs.write_byte(i, 0);
-            }
+        for i in 0..bs.len() {
+            bs.write_byte(i, 0);
+        }
 
-            // Convert to `&mut [u8]`
-            let bs = &mut *(bs as *mut _ as *mut [u8]);
+        // Convert to `&mut [u8]`
+        // SAFETY: the entire buffer is preinitialized above
+        let bs = unsafe { &mut *(bs as *mut _ as *mut [u8]) };
 
-            let n = read.read(bs)?;
-            assert!(n <= bs.len(), "AsyncRead reported that it initialized more than the number of bytes in the buffer");
-            n
-        };
-
-        buf.advance_mut(n);
+        let n = read.read(bs)?;
+        assert!(
+            n <= bs.len(),
+            "AsyncRead reported that it initialized more than the number of bytes in the buffer"
+        );
         n
     };
-    Ok(copied)
+
+    // SAFETY: the entire buffer has been preinitialized
+    unsafe { buf.advance_mut(n) };
+
+    Ok(n)
 }
 
 #[cfg(feature = "tokio-02")]
@@ -475,14 +447,14 @@ where
     ) -> Poll<io::Result<usize>> {
         let me = read.project();
 
-        tokio_read_buf(cx, me.inner, me.buf)
+        tokio_read_buf(me.inner, cx, me.buf)
     }
 }
 
 #[cfg(feature = "futures-03")]
 impl<R> CombineAsyncRead<BufReader<R>> for Bufferless
 where
-    R: futures_util_03::io::AsyncRead,
+    R: futures_io_03::AsyncRead,
 {
     fn poll_extend_buf(
         &mut self,
@@ -520,24 +492,30 @@ fn poll_extend_buf<R>(
     read: Pin<&mut R>,
 ) -> Poll<io::Result<usize>>
 where
-    R: futures_util_03::io::AsyncRead,
+    R: futures_io_03::AsyncRead,
 {
     // Copy of tokio's read_buf method (but it has to force initialize the buffer)
-    let copied = unsafe {
-        let n = {
-            let bs = buf.chunk_mut();
-            // Convert to `&mut [u8]`
-            let bs = &mut *(bs as *mut _ as *mut [u8]);
+    let n = {
+        let bs = buf.chunk_mut();
+        // preinit the buffer
+        for i in 0..bs.len() {
+            bs.write_byte(i, 0);
+        }
 
-            let n = ready!(read.poll_read(cx, bs))?;
-            assert!(n <= bs.len(), "AsyncRead reported that it initialized more than the number of bytes in the buffer");
-            n
-        };
+        // Convert to `&mut [u8]`
+        // SAFETY: preinitialize the buffer
+        let bs = unsafe { &mut *(bs as *mut _ as *mut [u8]) };
 
-        buf.advance_mut(n);
+        let n = ready!(read.poll_read(cx, bs))?;
+        assert!(
+            n <= bs.len(),
+            "AsyncRead reported that it initialized more than the number of bytes in the buffer"
+        );
         n
     };
-    Poll::Ready(Ok(copied))
+    // SAFETY: the buffer was preinitialized
+    unsafe { buf.advance_mut(n) };
+    Poll::Ready(Ok(n))
 }
 
 #[cfg(feature = "tokio-02")]
@@ -714,7 +692,7 @@ impl<R: tokio_dep::io::AsyncRead> tokio_dep::io::AsyncBufRead for BufReader<R> {
         // If we've reached the end of our internal buffer then we need to fetch
         // some more data from the underlying reader.
         if me.buf.is_empty() {
-            ready!(tokio_read_buf(cx, me.inner, me.buf))?;
+            ready!(tokio_read_buf(me.inner, cx, me.buf))?;
         }
         Poll::Ready(Ok(&me.buf[..]))
     }
@@ -800,8 +778,7 @@ mod tests {
 
     impl<R: AsyncRead> BufReader<R> {
         async fn extend_buf_tokio_02(mut self: Pin<&mut Self>) -> io::Result<usize> {
-            futures_util_03::future::poll_fn(|cx| Bufferless.poll_extend_buf(cx, self.as_mut()))
-                .await
+            crate::future_ext::poll_fn(|cx| Bufferless.poll_extend_buf(cx, self.as_mut())).await
         }
     }
 
@@ -841,7 +818,7 @@ mod tests {
     #[tokio::test]
     async fn buf_reader_extend_buf() {
         let read = BufReader::with_capacity(3, &[1u8, 2, 3, 4, 5, 6, 7, 8, 9, 0][..]);
-        futures_util_03::pin_mut!(read);
+        futures_03_dep::pin_mut!(read);
 
         assert_eq!(read.as_mut().extend_buf_tokio_02().await.unwrap(), 3);
         assert_eq!(read.buffer(), [1, 2, 3]);
@@ -868,8 +845,7 @@ mod tests_tokio_1 {
 
     impl<R: AsyncRead> BufReader<R> {
         async fn extend_buf_tokio(mut self: Pin<&mut Self>) -> io::Result<usize> {
-            futures_util_03::future::poll_fn(|cx| Bufferless.poll_extend_buf(cx, self.as_mut()))
-                .await
+            crate::future_ext::poll_fn(|cx| Bufferless.poll_extend_buf(cx, self.as_mut())).await
         }
     }
 
@@ -909,7 +885,7 @@ mod tests_tokio_1 {
     #[tokio::test]
     async fn buf_reader_extend_buf() {
         let read = BufReader::with_capacity(3, &[1u8, 2, 3, 4, 5, 6, 7, 8, 9, 0][..]);
-        futures_util_03::pin_mut!(read);
+        futures_03_dep::pin_mut!(read);
 
         assert_eq!(read.as_mut().extend_buf_tokio().await.unwrap(), 3);
         assert_eq!(read.buffer(), [1, 2, 3]);
@@ -926,6 +902,7 @@ mod tests_sync {
     use std::io::Read;
 
     #[test]
+    #[allow(clippy::unused_io_amount)]
     fn buf_reader() {
         let mut read = BufReader::with_capacity(3, &[1u8, 2, 3, 4, 5, 6, 7, 8, 9, 0][..]);
 
