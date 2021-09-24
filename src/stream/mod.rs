@@ -52,7 +52,7 @@ macro_rules! clone_resetable {
 pub mod buf_reader;
 /// Stream wrapper which provides a `ResetStream` impl for `StreamOnce` impls which do not have
 /// one.
-#[cfg(feature = "std")]
+#[cfg(feature = "alloc")]
 #[cfg_attr(docsrs, doc(cfg(feature = "std")))]
 pub mod buffered;
 #[cfg(feature = "std")]
@@ -576,7 +576,7 @@ impl<'a> RangeStreamOnce for &'a str {
             }
             match s.as_bytes().get(index) {
                 None => false,
-                Some(&b) => b < 128 || b >= 192,
+                Some(b) => !(128..=192).contains(b),
             }
         }
         if size <= self.len() {
@@ -616,12 +616,21 @@ impl<'a, T> Range for &'a [T] {
     }
 }
 
-fn slice_uncons_while<'a, T, F>(slice: &mut &'a [T], mut i: usize, mut f: F) -> &'a [T]
+#[repr(usize)]
+enum UnconsStart {
+    Zero = 0,
+    One = 1,
+}
+
+fn slice_uncons_while<'a, T, F>(slice: &mut &'a [T], start: UnconsStart, mut f: F) -> &'a [T]
 where
     F: FnMut(T) -> bool,
     T: Clone,
 {
+    let mut i = start as usize;
     let len = slice.len();
+    // SAFETY: We only call this function with `One` if the slice has length >= 1
+    debug_assert!(len >= i, "");
     let mut found = false;
 
     macro_rules! check {
@@ -634,6 +643,7 @@ where
         };
     }
 
+    // SAFETY: ensures we can access at least 8 elements starting at i, making get_unchecked sound.
     while len - i >= 8 {
         check!();
         check!();
@@ -679,7 +689,7 @@ where
     where
         F: FnMut(Self::Token) -> bool,
     {
-        Ok(slice_uncons_while(self, 0, f))
+        Ok(slice_uncons_while(self, UnconsStart::Zero, f))
     }
 
     #[inline]
@@ -698,7 +708,7 @@ where
             }
         }
 
-        CommitOk(slice_uncons_while(self, 1, f))
+        CommitOk(slice_uncons_while(self, UnconsStart::One, f))
     }
 
     #[inline]
@@ -1060,11 +1070,14 @@ where
     }
 }
 
-fn slice_uncons_while_ref<'a, T, F>(slice: &mut &'a [T], mut i: usize, mut f: F) -> &'a [T]
+fn slice_uncons_while_ref<'a, T, F>(slice: &mut &'a [T], start: UnconsStart, mut f: F) -> &'a [T]
 where
     F: FnMut(&'a T) -> bool,
 {
+    let mut i = start as usize;
     let len = slice.len();
+    // SAFETY: We only call this function with `One` if the slice has length >= 1
+    debug_assert!(len >= i, "");
     let mut found = false;
 
     macro_rules! check {
@@ -1077,6 +1090,7 @@ where
         };
     }
 
+    // SAFETY: ensures we can access at least 8 elements starting at i, making get_unchecked sound.
     while len - i >= 8 {
         check!();
         check!();
@@ -1122,7 +1136,7 @@ where
     where
         F: FnMut(Self::Token) -> bool,
     {
-        Ok(slice_uncons_while_ref(&mut self.0, 0, f))
+        Ok(slice_uncons_while_ref(&mut self.0, UnconsStart::Zero, f))
     }
 
     #[inline]
@@ -1139,7 +1153,7 @@ where
             None => return PeekErr(Tracked::from(UnexpectedParse::Eoi)),
         }
 
-        CommitOk(slice_uncons_while_ref(&mut self.0, 1, f))
+        CommitOk(slice_uncons_while_ref(&mut self.0, UnconsStart::One, f))
     }
 
     #[inline]
@@ -1877,7 +1891,7 @@ mod tests {
         input.uncons().unwrap();
         assert_eq!(input.distance(&before), 2);
 
-        input.reset(before.clone()).unwrap();
+        input.reset(before).unwrap();
         assert_eq!(input.distance(&before), 0);
     }
 }
