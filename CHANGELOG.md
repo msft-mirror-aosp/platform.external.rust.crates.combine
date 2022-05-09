@@ -1,3 +1,37 @@
+<a name="v4.6.3"></a>
+### v4.6.3 (2022-01-12)
+
+
+#### Bug Fixes
+
+* **easy:**  Only back-quote parser tokens ([08962d1d](https://github.com/Marwes/combine/commit/08962d1d4287c03edb84bd73a9eb09a42f294bc8), closes [#334](https://github.com/Marwes/combine/issues/334))
+
+
+
+<a name="v4.6.3"></a>
+### v4.6.3 (2022-01-12)
+
+
+#### Bug Fixes
+
+* **easy:**  Only back-quote parser tokens ([08962d1d](https://github.com/Marwes/combine/commit/08962d1d4287c03edb84bd73a9eb09a42f294bc8), closes [#334](https://github.com/Marwes/combine/issues/334))
+
+
+
+<a name="v4.6.2"></a>
+### v4.6.2 (2021-10-28)
+
+
+#### Performance
+
+*   Handle restarts better in take_until_byte{,s,2,3} ([03b19498](https://github.com/Marwes/combine/commit/03b19498189c873cdf8195a207a9f5a747ca40b7), closes [#327](https://github.com/Marwes/combine/issues/327))
+
+#### Bug Fixes
+
+*   warning ([08753d3e](https://github.com/Marwes/combine/commit/08753d3ebf072c0765e99bd6f440b52ef93cab40))
+
+
+
 <a name="v4.6.1"></a>
 ### v4.6.1 (2021-08-25)
 
